@@ -136,42 +136,74 @@ def search(item, text):
 
 
 def peliculas(item):
-    html_content = httptools.downloadpage(item.url).data
+    page_size = 20
+
+    """Split a list into chunks of size page_size."""
+    def chunk_list(lst):
+        return [lst[i:i + page_size] for i in range(0, len(lst), page_size)]
+
+    html_content = requests.get(item.url).text
 
     if 'la7teche' in item.url:
         patron = r'<a href="(?P<url>[^"]+)" title="(?P<title>[^"]+)" class="teche-i-img".*?url\(\'(?P<thumb>[^\']+)'
     else:
-        patron = r'<a href="(?P<url>[^"]+)"[^>]+><div class="[^"]+" data-background-image="(?P<thumb>[^"]+)"'
+        patron = r'<a href="(?P<title>(?P<url>[^"]+))" data-anchor[^>]+>.*?image="(?P<thumb>[^\"]+)'
+    
+    matches = chunk_list(re.findall(patron, html_content))
+    url_splits = item.url.split('?')
+    page = 0 if len(url_splits)==1 else int(url_splits[1])
 
-    match = support.match(html_content, patron=patron)
-    matches = match.matches
-    # url_splits = item.url.split('?')
+    def itInfo(n, key, item):
+        programma_url, titolo, thumb = key
 
-    itemlist = []
-    for n, key in enumerate(matches):
-        if 'la7teche' in item.url:
-            programma_url, titolo, thumb = key
-        else:
-            programma_url, thumb = key
-            titolo = " ".join(programma_url.replace("/", "").split('-')).title()
-
-        if not thumb.startswith("https://"):
-            thumb = f'{host}/{thumb}'
         programma_url = f'{host}{programma_url}'
         titolo = html.unescape(titolo)
+        titolo = titolo.replace("-", " ").replace("%C3%B9", "ù").replace("/", "").title()
+        html_content = requests.get(programma_url).text
+        plot = re.search(r'<div class="testo">.*?</div>', html_content, re.DOTALL)[0]
+        if plot:
+            text = re.sub(r'<[^>]+>', '\n', plot)   # Replace tags with newline
+            plot = re.sub(r'\n+', '\n', text).strip('\n')  # Collapse multiple newlines and remove leading/trailing ones
+        else:
+            plot = ""
+
+        regex = r'background-image:url\((\'|")([^\'"]+)(\'|")\);'
+        match = re.findall(regex, html_content)
+        if match:
+            fanart = match[0][1]
+        else:
+            fanart = ""
 
         it = item.clone(title=support.typo(titolo, 'bold'),
-                        data='',
-                        fulltitle=titolo,
-                        show=titolo,
-                        thumbnail=thumb,
-                        url=programma_url,
-                        video_url=programma_url,
-                        order=n)
+                    data='',
+                    fulltitle=titolo,
+                    show=titolo,
+                    thumbnail= thumb,
+                    fanart=fanart,
+                    url=programma_url,
+                    video_url=programma_url,
+                    plot=plot,
+                    order=n)
         it.action = 'episodios'
         it.contentSerieName = it.fulltitle
 
-        itemlist.append(it)
+        return it
+
+    itemlist = []
+    with futures.ThreadPoolExecutor() as executor:
+        itlist = [executor.submit(itInfo, n, it, item) for n, it in enumerate(matches[page])]
+        for res in futures.as_completed(itlist):
+            if res.result():
+                itemlist.append(res.result())
+    itemlist.sort(key=lambda it: it.order)
+
+    if page < len(matches)-1:
+        itemlist.append(
+            item.clone(title=support.typo('Next', 'bold'),
+                        url=f'{url_splits[0]}?{page+1}',
+                        order=len(itemlist)
+                )
+            )
 
     return itemlist
 
